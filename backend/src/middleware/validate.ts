@@ -6,9 +6,10 @@ export interface ValidationSchemas {
   body?: ZodType;
   query?: ZodType;
   params?: ZodType;
+  headers?: ZodType;
 }
 
-const SEGMENTS = ['body', 'query', 'params'] as const;
+const SEGMENTS = ['body', 'query', 'params', 'headers'] as const;
 
 /**
  * Zod-based request validation. All requested segments are validated so a
@@ -16,8 +17,9 @@ const SEGMENTS = ['body', 'query', 'params'] as const;
  *
  * Parsed (and transformed) values are stored on req.validated; req.body is
  * additionally replaced with its parsed value. req.query/req.params are left
- * untouched because Express 5 exposes them as read-only getters — handlers
- * must read validated input from req.validated.
+ * untouched because Express 5 exposes them as read-only getters, and
+ * req.headers is never replaced — handlers read validated input from
+ * req.validated.
  */
 export function validate(schemas: ValidationSchemas) {
   return (req: Request, _res: Response, next: NextFunction): void => {

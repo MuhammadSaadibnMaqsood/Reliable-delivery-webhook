@@ -5,6 +5,7 @@ import { errorHandler, notFoundHandler } from './middleware/error-handler.js';
 import { requestLogger } from './middleware/request-logger.js';
 import { authRouter } from './routes/auth.routes.js';
 import { devRouter } from './routes/dev.routes.js';
+import { eventRouter } from './routes/event.routes.js';
 import { healthRouter } from './routes/health.routes.js';
 import { projectRouter } from './routes/project.routes.js';
 
@@ -29,6 +30,7 @@ export function buildApp(): express.Express {
   app.use('/health', healthRouter);
   app.use('/api/v1/auth', authRouter);
   app.use('/api/v1/projects', projectRouter);
+  app.use('/api/v1/events', eventRouter);
 
   if (isDevelopment) {
     app.use('/__dev', devRouter);

@@ -5,7 +5,7 @@ import { z } from 'zod';
  * user.signup_completed): segments of [a-z0-9_-] joined by dots. This is the
  * app-level format convention FR-26 leaves to us; the DB only bounds length.
  */
-const EVENT_TYPE_NAME_PATTERN = /^[a-z0-9][a-z0-9_-]*(\.[a-z0-9][a-z0-9_-]*)*$/i;
+export const EVENT_TYPE_NAME_PATTERN = /^[a-z0-9][a-z0-9_-]*(\.[a-z0-9][a-z0-9_-]*)*$/i;
 
 export const createEventTypeSchema = z
   .object({

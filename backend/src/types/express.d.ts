@@ -14,6 +14,7 @@ declare global {
         body?: unknown;
         query?: unknown;
         params?: unknown;
+        headers?: unknown;
       };
       user?: AuthenticatedUser;
       /** Set by requireApiKey: the authenticated key and ITS project (never client-claimed). */

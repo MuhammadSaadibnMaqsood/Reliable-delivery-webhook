@@ -67,6 +67,14 @@ export async function requireApiKey(req: Request, _res: Response, next: NextFunc
   next();
 }
 
+/** Typed accessor for handlers behind requireApiKey (narrows the optional away). */
+export function currentApiKey(req: Request): { id: string; projectId: string } {
+  if (!req.apiKey) {
+    throw AppError.unauthorized('API key required');
+  }
+  return req.apiKey;
+}
+
 /**
  * last_used_at is observability, not authentication state: update at most
  * once per minute, fire-and-forget, so the hot path never waits on it.
