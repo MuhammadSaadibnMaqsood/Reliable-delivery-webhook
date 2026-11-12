@@ -10,11 +10,26 @@ import type {
 export async function ingestEventHandler(req: Request, res: Response): Promise<void> {
   const apiKey = currentApiKey(req); // project identity from the key record only
   const headers = req.validated?.headers as IngestEventHeaders;
-  const event = await ingestEvent(
+  const result = await ingestEvent(
     apiKey.projectId,
     req.validated?.body as IngestEventInput,
     headers['idempotency-key'],
   );
+
+  if (result.kind === 'replay') {
+    // Same key + same canonical payload: return the ORIGINAL event, 200.
+    sendSuccess(res, {
+      statusCode: 200,
+      message: 'Event already accepted (idempotent replay)',
+      data: { event: result.event, idempotentReplay: true },
+    });
+    return;
+  }
+
   // 202: accepted and persisted; asynchronous delivery happens later.
-  sendSuccess(res, { statusCode: 202, message: 'Event accepted', data: { event } });
+  sendSuccess(res, {
+    statusCode: 202,
+    message: 'Event accepted',
+    data: { event: result.event, idempotentReplay: false },
+  });
 }

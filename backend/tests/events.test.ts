@@ -28,6 +28,7 @@ let token: string;
 let projectA: string;
 let projectB: string;
 let apiKeyA: string; // plaintext, project A
+let apiKeyB: string; // plaintext, project B
 
 async function setupUserProjectKey(): Promise<void> {
   const email = `p5a1-${randomUUID()}@example.test`;
@@ -55,6 +56,14 @@ async function setupUserProjectKey(): Promise<void> {
   expect(key.status).toBe(201);
   created.apiKeyIds.push(key.body.data.apiKey.id as string);
   apiKeyA = key.body.data.plaintextKey as string;
+
+  const keyB = await request(app)
+    .post(`/api/v1/projects/${projectB}/api-keys`)
+    .set('Authorization', `Bearer ${token}`)
+    .send({ name: 'Ingest Key B' });
+  expect(keyB.status).toBe(201);
+  created.apiKeyIds.push(keyB.body.data.apiKey.id as string);
+  apiKeyB = keyB.body.data.plaintextKey as string;
 
   const typeA = await request(app)
     .post(`/api/v1/projects/${projectA}/event-types`)
@@ -188,21 +197,94 @@ describe('event ingestion', () => {
     }
   });
 
-  it('reused idempotency key currently returns 409 (full UC-20 semantics land in 5A.2)', async () => {
+});
+
+describe('reliable idempotency (5A.2)', () => {
+  it('creates, replays identical payloads (even reordered), conflicts on different payloads', async () => {
     const idempotencyKey = `idem-${randomUUID()}`;
+    const payload = { n: 1, nested: { b: 2, a: 1 } };
+
+    // Scenario 1: new request → created.
     const first = await ingest(
-      { eventType: 'order.created', payload: { n: 1 } },
+      { eventType: 'order.created', payload },
       { key: apiKeyA, idempotencyKey },
     );
     expect(first.status).toBe(202);
-    created.eventIds.push(first.body.data.event.id as string);
+    expect(first.body.data.idempotentReplay).toBe(false);
+    const eventId = first.body.data.event.id as string;
+    created.eventIds.push(eventId);
 
-    const second = await ingest(
-      { eventType: 'order.created', payload: { n: 1 } },
+    // Scenario 2: same key + same payload → 200 replay of the ORIGINAL event.
+    const replay = await ingest(
+      { eventType: 'order.created', payload },
       { key: apiKeyA, idempotencyKey },
     );
-    expect(second.status).toBe(409);
-    expect(second.body.error.code).toBe('CONFLICT');
+    expect(replay.status).toBe(200);
+    expect(replay.body.data.idempotentReplay).toBe(true);
+    expect(replay.body.data.event.id).toBe(eventId);
+
+    // Scenario 2b: equivalent object, different property order → still a replay.
+    const reordered = await ingest(
+      { eventType: 'order.created', payload: { nested: { a: 1, b: 2 }, n: 1 } },
+      { key: apiKeyA, idempotencyKey },
+    );
+    expect(reordered.status).toBe(200);
+    expect(reordered.body.data.idempotentReplay).toBe(true);
+    expect(reordered.body.data.event.id).toBe(eventId);
+
+    // Scenario 3: same key + different payload value → 409, existing untouched.
+    const conflict = await ingest(
+      { eventType: 'order.created', payload: { n: 2, nested: { b: 2, a: 1 } } },
+      { key: apiKeyA, idempotencyKey },
+    );
+    expect(conflict.status).toBe(409);
+    expect(conflict.body.error.code).toBe('CONFLICT');
+    expect(conflict.body.message).toContain('different payload');
+
+    const rows = await prisma.event.findMany({
+      where: { projectId: projectA, idempotencyKey },
+    });
+    expect(rows).toHaveLength(1); // no second event, ever
+    expect(rows[0]!.id).toBe(eventId);
+    expect(rows[0]!.payload).toEqual(payload); // original payload unmodified
+  });
+
+  it('keeps the same idempotency key independent across projects', async () => {
+    const idempotencyKey = `idem-shared-${randomUUID()}`;
+    const inA = await ingest(
+      { eventType: 'order.created', payload: { p: 'a' } },
+      { key: apiKeyA, idempotencyKey },
+    );
+    const inB = await ingest(
+      { eventType: 'b.only', payload: { p: 'b' } },
+      { key: apiKeyB, idempotencyKey },
+    );
+    expect(inA.status).toBe(202); // same key string, different projects:
+    expect(inB.status).toBe(202); // both are first submissions
+    created.eventIds.push(inA.body.data.event.id as string, inB.body.data.event.id as string);
+  });
+
+  it('concurrent same-key submissions: constraint decides, exactly one event exists', async () => {
+    const idempotencyKey = `idem-race-${randomUUID()}`;
+    const payload = { race: true, n: 42 };
+
+    const results = await Promise.all(
+      Array.from({ length: 5 }, () =>
+        ingest({ eventType: 'order.created', payload }, { key: apiKeyA, idempotencyKey }),
+      ),
+    );
+
+    const statuses = results.map((r) => r.status);
+    expect(statuses.filter((s) => s === 202)).toHaveLength(1); // one winner…
+    expect(statuses.filter((s) => s === 200)).toHaveLength(4); // …four replays
+    const ids = new Set(results.map((r) => r.body.data.event.id as string));
+    expect(ids.size).toBe(1); // every caller got the SAME event
+
+    const rows = await prisma.event.findMany({
+      where: { projectId: projectA, idempotencyKey },
+    });
+    expect(rows).toHaveLength(1); // exactly one row after the race
+    created.eventIds.push(rows[0]!.id);
   });
 });
 
