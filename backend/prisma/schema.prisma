@@ -1,0 +1,271 @@
+// ===========================================================================
+// Reliable Webhook Delivery & Automation Platform — database schema
+//
+// Implements the approved ERD exactly (design frozen 2026-11-12).
+// 9 entities, 6 enums. Snake_case table/column names via @map/@@map.
+//
+// NOT expressible here, lives in migration SQL (see prisma/README.md):
+//   - CHECK constraints (state-machine invariants, bounds)
+//   - Partial indexes (queue hot paths)
+//   - Column comments documenting claim_token lifecycle and ID semantics
+//
+// Workflow rules: Prisma Migrate ONLY — `prisma db push` is forbidden in this
+// repository because it would not know about the SQL-only objects above.
+// ===========================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL") // pooled, application runtime
+  directUrl = env("DIRECT_URL") // direct, Prisma Migrate only
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum UserRole {
+  user
+  admin
+
+  @@map("user_role")
+}
+
+enum UserStatus {
+  active
+  disabled
+
+  @@map("user_status")
+}
+
+enum DeliveryStatus {
+  pending // queued; "retrying" in the UI = pending with attempt_count > 0
+  processing // claimed by a worker (claim_token + lease held)
+  succeeded // terminal (FR-45: never retried)
+  failed // terminal: permanent, non-retryable failure
+  dead_lettered // terminal: retry attempts exhausted (UC-25)
+  cancelled // terminal: endpoint deactivated/deleted or project deleted
+
+  @@map("delivery_status")
+}
+
+enum AttemptTrigger {
+  automatic
+  manual
+
+  @@map("attempt_trigger")
+}
+
+enum AttemptOutcome {
+  success
+  failed_retryable
+  failed_permanent
+
+  @@map("attempt_outcome")
+}
+
+enum ErrorCategory {
+  timeout
+  connection
+  dns
+  tls
+  http_4xx
+  http_5xx
+  ssrf_blocked
+  other
+
+  @@map("error_category")
+}
+
+// ---------------------------------------------------------------------------
+// Identity & tenancy
+// ---------------------------------------------------------------------------
+
+model User {
+  id           String     @id @default(uuid(7)) @db.Uuid
+  email        String     @unique // normalized to lowercase at the application layer
+  passwordHash String     @map("password_hash")
+  name         String
+  role         UserRole   @default(user) // FR-05
+  status       UserStatus @default(active) // FR-58: disable, never delete
+  createdAt    DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime   @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  projects      Project[]
+  manualRetries DeliveryAttempt[] @relation("ManualRetryUser")
+
+  @@map("users")
+}
+
+model Project {
+  id          String    @id @default(uuid(7)) @db.Uuid
+  userId      String    @map("user_id") @db.Uuid
+  name        String
+  description String?
+  deletedAt   DateTime? @map("deleted_at") @db.Timestamptz(6) // soft delete; deletion cascade is one transaction (revoke keys, deactivate endpoints, cancel pending deliveries)
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  owner      User        @relation(fields: [userId], references: [id], onDelete: Restrict)
+  apiKeys    ApiKey[]
+  endpoints  Endpoint[]
+  eventTypes EventType[]
+  events     Event[]
+
+  @@index([userId])
+  @@map("projects")
+}
+
+model ApiKey {
+  id         String    @id @default(uuid(7)) @db.Uuid
+  projectId  String    @map("project_id") @db.Uuid
+  name       String
+  keyPrefix  String    @unique @map("key_prefix") // public part of the presented key; O(1) lookup
+  keyHash    String    @unique @map("key_hash") // sha256 of the secret part (NFR-11: no plaintext)
+  revokedAt  DateTime? @map("revoked_at") @db.Timestamptz(6) // FR-12/13: revocation is the lifecycle, never deletion
+  lastUsedAt DateTime? @map("last_used_at") @db.Timestamptz(6)
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Restrict)
+
+  @@index([projectId])
+  @@map("api_keys")
+}
+
+// ---------------------------------------------------------------------------
+// Destination configuration
+// ---------------------------------------------------------------------------
+
+model Endpoint {
+  id            String    @id @default(uuid(7)) @db.Uuid
+  projectId     String    @map("project_id") @db.Uuid
+  url           String // validated + SSRF-checked at registration (FR-18/56); re-checked at delivery time
+  description   String?
+  isActive      Boolean   @default(true) @map("is_active") // FR-17; deactivation cancels pending deliveries in the same transaction
+  signingSecret String    @map("signing_secret") // encrypted at rest by the application (NFR-12); needed for signing, so not hashable
+  timeoutMs     Int?      @map("timeout_ms") // FR-37: per-endpoint override; platform default when NULL
+  maxAttempts   Int?      @map("max_attempts") // FR-40: per-endpoint override; platform default when NULL
+  deletedAt     DateTime? @map("deleted_at") @db.Timestamptz(6) // soft delete; implies is_active = false
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  project       Project        @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  subscriptions Subscription[]
+  deliveries    Delivery[]
+
+  // Composite-FK support: lets child rows prove they stay inside the same project.
+  @@unique([id, projectId])
+  @@map("endpoints")
+}
+
+model EventType {
+  id          String   @id @default(uuid(7)) @db.Uuid
+  projectId   String   @map("project_id") @db.Uuid
+  name        String // e.g. "order.paid"; format validated at the application layer
+  description String?
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  project       Project        @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  subscriptions Subscription[]
+  events        Event[]
+
+  @@unique([projectId, name]) // FR-26: the registry is the validation source of truth
+  @@unique([id, projectId]) // composite-FK support
+  @@map("event_types")
+}
+
+model Subscription {
+  id          String   @id @default(uuid(7)) @db.Uuid
+  endpointId  String   @map("endpoint_id") @db.Uuid
+  eventTypeId String   @map("event_type_id") @db.Uuid
+  projectId   String   @map("project_id") @db.Uuid // shared FK column: both composite FKs below must agree, so endpoint and event type are provably in the same project
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  endpoint  Endpoint  @relation(fields: [endpointId, projectId], references: [id, projectId], onDelete: Restrict)
+  eventType EventType @relation(fields: [eventTypeId, projectId], references: [id, projectId], onDelete: Restrict)
+
+  @@unique([endpointId, eventTypeId]) // AC-04: no duplicate subscriptions
+  @@index([eventTypeId]) // fan-out reverse lookup
+  @@map("subscriptions")
+}
+
+// ---------------------------------------------------------------------------
+// Ingestion & delivery (append-only history; soft deletes never touch these)
+// ---------------------------------------------------------------------------
+
+model Event {
+  id             String   @id @default(uuid(7)) @db.Uuid // returned to the producer in the acceptance response
+  projectId      String   @map("project_id") @db.Uuid
+  eventTypeId    String   @map("event_type_id") @db.Uuid
+  payload        Json // jsonb; note: jsonb normalizes key order
+  payloadHash    String   @map("payload_hash") // sha256 of the canonical serialization, computed at ingestion — used for the 409-conflict comparison (UC-20)
+  idempotencyKey String   @map("idempotency_key") // required (UC-20 main flow)
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  project    Project    @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  eventType  EventType  @relation(fields: [eventTypeId, projectId], references: [id, projectId], onDelete: Restrict)
+  deliveries Delivery[]
+
+  @@unique([projectId, idempotencyKey]) // FR-29: idempotency enforced by constraint, not check-then-insert
+  @@unique([id, projectId]) // composite-FK support
+  @@index([projectId, createdAt(sort: Desc)]) // event history (FR-46)
+  @@index([projectId, eventTypeId, createdAt(sort: Desc)]) // history filtered by type
+  @@map("events")
+}
+
+model Delivery {
+  // Public delivery identifier (NFR-07/27), sent in signed webhook headers so
+  // receivers can deduplicate. An IDENTIFIER, not an authorization credential:
+  // every access path must verify project ownership (NFR-13/FR-57).
+  id             String         @id @default(uuid(7)) @db.Uuid
+  eventId        String         @map("event_id") @db.Uuid
+  endpointId     String         @map("endpoint_id") @db.Uuid
+  projectId      String         @map("project_id") @db.Uuid // denormalized for authorization checks + FR-52 filters; composite FKs keep it consistent
+  status         DeliveryStatus @default(pending)
+  attemptCount   Int            @default(0) @map("attempt_count") // incremented exactly once per claim
+  maxAttempts    Int            @map("max_attempts") // policy snapshot at creation; manual retry sets attempt_count + 1
+  nextAttemptAt  DateTime       @default(now()) @map("next_attempt_at") @db.Timestamptz(6) // FR-39: exponential backoff schedule
+  leaseExpiresAt DateTime?      @map("lease_expires_at") @db.Timestamptz(6) // UC-23: processing lease; expiry makes the row RECLAIMABLE, it does not by itself invalidate claim_token
+  claimToken     String?        @map("claim_token") @db.Uuid // fencing token, minted per claim; see column comment in migration SQL
+  lockedBy       String?        @map("locked_by") // worker id, observability only
+  lastError      String?        @map("last_error") // denormalized for list views; full detail lives in delivery_attempts
+  completedAt    DateTime?      @map("completed_at") @db.Timestamptz(6) // set exactly when status is terminal (CHECK-enforced); manual retry resets to NULL
+  createdAt      DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime       @updatedAt @map("updated_at") @db.Timestamptz(6) // NOTE: raw-SQL queue statements must set updated_at = now() themselves
+
+  event    Event             @relation(fields: [eventId, projectId], references: [id, projectId], onDelete: Restrict)
+  endpoint Endpoint          @relation(fields: [endpointId, projectId], references: [id, projectId], onDelete: Restrict)
+  attempts DeliveryAttempt[]
+
+  // No direct relation to Project: project_id validity is transitively
+  // enforced through both composite FKs above (by design).
+  @@unique([eventId, endpointId]) // idempotent fan-out: one delivery per (event, endpoint)
+  @@index([projectId, status, createdAt(sort: Desc)]) // dashboard filters (FR-52) + DLQ view (FR-43)
+  @@index([endpointId, createdAt(sort: Desc)]) // per-endpoint history
+  @@map("deliveries")
+}
+
+model DeliveryAttempt {
+  id                String         @id @default(uuid(7)) @db.Uuid
+  deliveryId        String         @map("delivery_id") @db.Uuid
+  attemptNumber     Int            @map("attempt_number") // = attempt_count at claim time; gaps mark crashed or fenced-out attempts
+  trigger           AttemptTrigger @default(automatic) // UC-30 audit
+  triggeredByUserId String?        @map("triggered_by_user_id") @db.Uuid
+  outcome           AttemptOutcome // rows are written on completion only, by the current claim holder (CAS-guarded)
+  responseStatus    Int?           @map("response_status") // NFR-28; NULL for network-level failures
+  latencyMs         Int?           @map("latency_ms")
+  errorCategory     ErrorCategory? @map("error_category")
+  errorMessage      String?        @map("error_message") // truncated by the application
+  requestUrl        String         @map("request_url") // endpoint URL actually called (endpoints.url is mutable)
+  startedAt         DateTime       @map("started_at") @db.Timestamptz(6)
+  finishedAt        DateTime?      @map("finished_at") @db.Timestamptz(6)
+
+  delivery        Delivery @relation(fields: [deliveryId], references: [id], onDelete: Restrict)
+  triggeredByUser User?    @relation("ManualRetryUser", fields: [triggeredByUserId], references: [id], onDelete: SetNull)
+
+  @@unique([deliveryId, attemptNumber])
+  @@map("delivery_attempts")
+}

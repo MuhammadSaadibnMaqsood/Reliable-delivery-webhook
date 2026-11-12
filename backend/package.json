@@ -1,0 +1,25 @@
+{
+  "name": "webhook-platform",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Reliable Webhook Delivery & Automation Platform — database layer (Phase: Prisma schema + initial migration)",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "prisma:validate": "prisma validate",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate:new": "prisma migrate dev --create-only",
+    "prisma:migrate:dev": "prisma migrate dev",
+    "prisma:migrate:deploy": "prisma migrate deploy",
+    "prisma:studio": "prisma studio"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.16.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "prisma": "^6.16.0",
+    "typescript": "^5.9.2"
+  }
+}

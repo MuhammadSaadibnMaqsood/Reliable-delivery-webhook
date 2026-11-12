@@ -1,0 +1,16 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Environment files — never commit credentials (NFR-24)
+.env
+.env.*
+!.env.example
+
+# Prisma generated client lives in node_modules; nothing extra to ignore here
+
+# OS / editor noise
+Thumbs.db
+.DS_Store
