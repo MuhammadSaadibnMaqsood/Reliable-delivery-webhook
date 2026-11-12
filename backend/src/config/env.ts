@@ -1,0 +1,41 @@
+import 'dotenv/config';
+import { z } from 'zod';
+
+/**
+ * Environment configuration (NFR-24): parsed and validated once at startup.
+ * The process refuses to boot with an invalid configuration, and validation
+ * failures never echo variable VALUES (they may contain credentials) — only
+ * variable names and what is wrong with them.
+ */
+const envSchema = z.object({
+  NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
+  PORT: z.coerce.number().int().min(1).max(65535).default(4000),
+  DATABASE_URL: z.string().min(1, 'DATABASE_URL is required'),
+  CORS_ORIGINS: z.string().default('http://localhost:3000'),
+  LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
+  SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().min(0).default(10_000),
+});
+
+const parsed = envSchema.safeParse(process.env);
+
+if (!parsed.success) {
+  const problems = parsed.error.issues
+    .map((issue) => `  - ${issue.path.map(String).join('.') || '(root)'}: ${issue.message}`)
+    .join('\n');
+  // eslint-disable-next-line no-console -- logger cannot exist before config does
+  console.error(`Invalid environment configuration:\n${problems}`);
+  process.exit(1);
+}
+
+export const env = parsed.data;
+
+export const isProduction = env.NODE_ENV === 'production';
+export const isDevelopment = env.NODE_ENV === 'development';
+
+/** Parsed CORS allow-list: '*' means reflect any origin. */
+export const corsOrigins: '*' | string[] =
+  env.CORS_ORIGINS.trim() === '*'
+    ? '*'
+    : env.CORS_ORIGINS.split(',')
+        .map((origin) => origin.trim())
+        .filter((origin) => origin.length > 0);
