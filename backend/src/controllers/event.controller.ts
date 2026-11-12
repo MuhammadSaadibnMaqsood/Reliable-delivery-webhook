@@ -26,10 +26,15 @@ export async function ingestEventHandler(req: Request, res: Response): Promise<v
     return;
   }
 
-  // 202: accepted and persisted; asynchronous delivery happens later.
+  // 202: accepted and persisted with its delivery jobs; the worker (Phase 5B)
+  // processes them asynchronously.
   sendSuccess(res, {
     statusCode: 202,
     message: 'Event accepted',
-    data: { event: result.event, idempotentReplay: false },
+    data: {
+      event: result.event,
+      idempotentReplay: false,
+      deliveriesCreated: result.deliveriesCreated,
+    },
   });
 }

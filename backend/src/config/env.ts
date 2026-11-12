@@ -27,6 +27,10 @@ const envSchema = z.object({
   SECRET_ENCRYPTION_KEY: z
     .string()
     .regex(/^[0-9a-f]{64}$/i, 'must be 64 hex characters (a 32-byte AES-256 key)'),
+  // PROVISIONAL platform default for a delivery's attempt budget, snapshotted
+  // onto each delivery at fan-out when the endpoint has no override
+  // (max_attempts). Final value is a pending Phase-0 retry-policy decision.
+  DELIVERY_MAX_ATTEMPTS_DEFAULT: z.coerce.number().int().min(1).max(20).default(5),
 });
 
 const parsed = envSchema.safeParse(process.env);
