@@ -3,8 +3,10 @@ import express from 'express';
 import { corsOrigins, isDevelopment } from './config/env.js';
 import { errorHandler, notFoundHandler } from './middleware/error-handler.js';
 import { requestLogger } from './middleware/request-logger.js';
+import { authRouter } from './routes/auth.routes.js';
 import { devRouter } from './routes/dev.routes.js';
 import { healthRouter } from './routes/health.routes.js';
+import { projectRouter } from './routes/project.routes.js';
 
 /**
  * Builds the Express application: middleware chain, routes, terminal handlers.
@@ -25,6 +27,8 @@ export function buildApp(): express.Express {
   app.use(express.json({ limit: '1mb' }));
 
   app.use('/health', healthRouter);
+  app.use('/api/v1/auth', authRouter);
+  app.use('/api/v1/projects', projectRouter);
 
   if (isDevelopment) {
     app.use('/__dev', devRouter);

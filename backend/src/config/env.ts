@@ -14,6 +14,14 @@ const envSchema = z.object({
   CORS_ORIGINS: z.string().default('http://localhost:3000'),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
   SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().min(0).default(10_000),
+  // --- Authentication (secrets never logged; validation errors never echo values) ---
+  JWT_SECRET: z.string().min(32, 'must be at least 32 characters of random data'),
+  JWT_EXPIRES_IN: z
+    .string()
+    .regex(/^\d+(ms|s|m|h|d)$/, 'must look like 900s, 15m, 12h or 1d')
+    .default('1d'),
+  AUTH_RATE_LIMIT_WINDOW_MS: z.coerce.number().int().min(1_000).default(900_000),
+  AUTH_RATE_LIMIT_MAX: z.coerce.number().int().min(1).default(20),
 });
 
 const parsed = envSchema.safeParse(process.env);

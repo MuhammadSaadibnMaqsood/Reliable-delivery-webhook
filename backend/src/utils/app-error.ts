@@ -3,7 +3,11 @@ export const ErrorCodes = {
   VALIDATION_ERROR: 'VALIDATION_ERROR',
   MALFORMED_JSON: 'MALFORMED_JSON',
   PAYLOAD_TOO_LARGE: 'PAYLOAD_TOO_LARGE',
+  UNAUTHORIZED: 'UNAUTHORIZED',
+  FORBIDDEN: 'FORBIDDEN',
   NOT_FOUND: 'NOT_FOUND',
+  CONFLICT: 'CONFLICT',
+  RATE_LIMITED: 'RATE_LIMITED',
   SERVICE_UNAVAILABLE: 'SERVICE_UNAVAILABLE',
   INTERNAL_ERROR: 'INTERNAL_ERROR',
 } as const;
@@ -46,6 +50,15 @@ export class AppError extends Error {
 
   static notFound(message: string): AppError {
     return new AppError(message, 404, ErrorCodes.NOT_FOUND);
+  }
+
+  /** Deliberately generic: auth failures never explain which part failed. */
+  static unauthorized(message = 'Authentication required'): AppError {
+    return new AppError(message, 401, ErrorCodes.UNAUTHORIZED);
+  }
+
+  static forbidden(message = 'Insufficient permissions'): AppError {
+    return new AppError(message, 403, ErrorCodes.FORBIDDEN);
   }
 
   static validation(details: ErrorDetail[]): AppError {
