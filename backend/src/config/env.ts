@@ -22,6 +22,11 @@ const envSchema = z.object({
     .default('1d'),
   AUTH_RATE_LIMIT_WINDOW_MS: z.coerce.number().int().min(1_000).default(900_000),
   AUTH_RATE_LIMIT_MAX: z.coerce.number().int().min(1).default(20),
+  // AES-256-GCM key for signing secrets at rest. Dedicated key: never the
+  // JWT secret, never an API key hash. Boot fails rather than storing plaintext.
+  SECRET_ENCRYPTION_KEY: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/i, 'must be 64 hex characters (a 32-byte AES-256 key)'),
 });
 
 const parsed = envSchema.safeParse(process.env);

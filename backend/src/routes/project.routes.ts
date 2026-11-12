@@ -8,6 +8,9 @@ import {
 } from '../controllers/project.controller.js';
 import { requireAuth } from '../middleware/auth.js';
 import { validate } from '../middleware/validate.js';
+import { apiKeyRouter } from './api-key.routes.js';
+import { endpointRouter } from './endpoint.routes.js';
+import { eventTypeRouter } from './event-type.routes.js';
 import {
   createProjectSchema,
   listProjectsQuerySchema,
@@ -19,6 +22,13 @@ export const projectRouter: Router = Router();
 
 // Everything below requires an authenticated, active user.
 projectRouter.use(requireAuth);
+
+// Project-scoped API key management (Phase 4A).
+projectRouter.use('/:projectId/api-keys', apiKeyRouter);
+
+// Endpoint management + subscriptions, and event types (Phase 4B).
+projectRouter.use('/:projectId/endpoints', endpointRouter);
+projectRouter.use('/:projectId/event-types', eventTypeRouter);
 
 projectRouter.post('/', validate({ body: createProjectSchema }), createProjectHandler);
 projectRouter.get('/', validate({ query: listProjectsQuerySchema }), listProjectsHandler);

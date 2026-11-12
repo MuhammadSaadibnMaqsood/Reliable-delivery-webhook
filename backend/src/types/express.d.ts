@@ -16,6 +16,11 @@ declare global {
         params?: unknown;
       };
       user?: AuthenticatedUser;
+      /** Set by requireApiKey: the authenticated key and ITS project (never client-claimed). */
+      apiKey?: {
+        id: string;
+        projectId: string;
+      };
     }
   }
 }

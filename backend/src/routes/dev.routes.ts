@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
+import { requireApiKey } from '../middleware/api-key-auth.js';
 import { validate } from '../middleware/validate.js';
 import { sendSuccess } from '../utils/api-response.js';
 
@@ -24,4 +25,13 @@ devRouter.post('/validation-demo', validate({ body: validationDemoSchema }), (re
 devRouter.get('/boom', async () => {
   // Express 5 forwards rejected promises to the central error handler.
   throw new Error('Simulated unexpected failure (dev-only route)');
+});
+
+// Stand-in for the Phase-5 ingestion endpoints: proves X-API-Key auth
+// end-to-end (the attached project identity comes from the key record only).
+devRouter.get('/apikey-probe', requireApiKey, (req, res) => {
+  sendSuccess(res, {
+    message: 'API key accepted',
+    data: { projectId: req.apiKey?.projectId, apiKeyId: req.apiKey?.id },
+  });
 });

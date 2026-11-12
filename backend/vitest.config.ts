@@ -4,6 +4,14 @@ export default defineConfig({
   test: {
     environment: 'node',
     include: ['tests/**/*.test.ts'],
+    // Vitest defaults NODE_ENV to 'test' (and dotenv never overrides existing
+    // vars), but the suite exercises development-gated behavior (the
+    // /__dev/apikey-probe stand-in for Phase-5 ingestion). Pin it explicitly;
+    // keep logs at warn so request spam stays out of test output.
+    env: {
+      NODE_ENV: 'development',
+      LOG_LEVEL: 'warn',
+    },
     // Integration tests share one real (Neon) database — run files sequentially
     // to keep connection counts low and rate-limiter state per file.
     fileParallelism: false,
