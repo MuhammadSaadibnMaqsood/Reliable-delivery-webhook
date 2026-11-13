@@ -1,0 +1,11 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "rewrites": [
+    { "source": "/internal/worker/tick", "destination": "/api/worker-tick" },
+    { "source": "/(.*)", "destination": "/api/index" }
+  ],
+  "functions": {
+    "api/worker-tick.ts": { "maxDuration": 300 },
+    "api/index.ts": { "maxDuration": 30 }
+  }
+}

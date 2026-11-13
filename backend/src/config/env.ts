@@ -32,7 +32,10 @@ const envSchema = z.object({
   // (max_attempts). Final value is a pending Phase-0 retry-policy decision.
   DELIVERY_MAX_ATTEMPTS_DEFAULT: z.coerce.number().int().min(1).max(20).default(5),
   // Worker tick bounds (NFR-04: bounded batches within serverless limits).
-  WORKER_BATCH_SIZE: z.coerce.number().int().min(1).max(100).default(10),
+  // Default 4 is sized for the Vercel worker function: 4 × worst-case
+  // attempt (30 s timeout cap + overhead) ≈ 130 s, well inside its 300 s
+  // maxDuration. Raise via env on hosts with bigger budgets.
+  WORKER_BATCH_SIZE: z.coerce.number().int().min(1).max(100).default(4),
   // Claim lease duration. The tick renews the lease per item, so this must
   // cover ONE in-flight attempt: strictly above the 30 s endpoint timeout
   // cap plus margin — then expiry means "worker is gone", never "request is
