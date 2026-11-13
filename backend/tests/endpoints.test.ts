@@ -3,6 +3,7 @@ import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/db/prisma.js';
+import { runCleanup } from './cleanup-helper.js';
 import { decryptSecret, parseEncryptionKey } from '../src/utils/crypto.js';
 import { validateDestinationUrl } from '../src/utils/destination-url.js';
 
@@ -62,16 +63,17 @@ beforeAll(async () => {
   created.projectIds.push(projectId);
 });
 
-afterAll(async () => {
-  await prisma.deliveryAttempt.deleteMany({ where: { id: { in: created.attemptIds } } });
-  await prisma.delivery.deleteMany({ where: { id: { in: created.deliveryIds } } });
-  await prisma.event.deleteMany({ where: { id: { in: created.eventIds } } });
-  await prisma.endpoint.deleteMany({ where: { id: { in: created.endpointIds } } });
-  await prisma.eventType.deleteMany({ where: { id: { in: created.eventTypeIds } } });
-  await prisma.project.deleteMany({ where: { id: { in: created.projectIds } } });
-  await prisma.user.deleteMany({ where: { id: { in: created.userIds } } });
-  await prisma.$disconnect();
-});
+afterAll(() =>
+  runCleanup('endpoints', [
+    ['attempts', () => prisma.deliveryAttempt.deleteMany({ where: { id: { in: created.attemptIds } } })],
+    ['deliveries', () => prisma.delivery.deleteMany({ where: { id: { in: created.deliveryIds } } })],
+    ['events', () => prisma.event.deleteMany({ where: { id: { in: created.eventIds } } })],
+    ['endpoints', () => prisma.endpoint.deleteMany({ where: { id: { in: created.endpointIds } } })],
+    ['eventTypes', () => prisma.eventType.deleteMany({ where: { id: { in: created.eventTypeIds } } })],
+    ['projects', () => prisma.project.deleteMany({ where: { id: { in: created.projectIds } } })],
+    ['users', () => prisma.user.deleteMany({ where: { id: { in: created.userIds } } })],
+  ]),
+);
 
 async function registerEndpoint(url = VALID_URL): Promise<{ id: string; secret: string }> {
   const res = await request(app)

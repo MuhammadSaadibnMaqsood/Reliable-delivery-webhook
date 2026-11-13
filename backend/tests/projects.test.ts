@@ -3,6 +3,7 @@ import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/db/prisma.js';
+import { runCleanup } from './cleanup-helper.js';
 
 /**
  * Project management integration tests against the real database.
@@ -47,18 +48,19 @@ beforeAll(async () => {
   bob = await makeUser('bob');
 });
 
-afterAll(async () => {
+afterAll(() =>
   // Exact-id cleanup of this run's fixtures, children before parents.
-  await prisma.deliveryAttempt.deleteMany({ where: { id: { in: created.attemptIds } } });
-  await prisma.delivery.deleteMany({ where: { id: { in: created.deliveryIds } } });
-  await prisma.event.deleteMany({ where: { id: { in: created.eventIds } } });
-  await prisma.endpoint.deleteMany({ where: { id: { in: created.endpointIds } } });
-  await prisma.apiKey.deleteMany({ where: { id: { in: created.apiKeyIds } } });
-  await prisma.eventType.deleteMany({ where: { id: { in: created.eventTypeIds } } });
-  await prisma.project.deleteMany({ where: { id: { in: created.projectIds } } });
-  await prisma.user.deleteMany({ where: { id: { in: created.userIds } } });
-  await prisma.$disconnect();
-});
+  runCleanup('projects', [
+    ['attempts', () => prisma.deliveryAttempt.deleteMany({ where: { id: { in: created.attemptIds } } })],
+    ['deliveries', () => prisma.delivery.deleteMany({ where: { id: { in: created.deliveryIds } } })],
+    ['events', () => prisma.event.deleteMany({ where: { id: { in: created.eventIds } } })],
+    ['endpoints', () => prisma.endpoint.deleteMany({ where: { id: { in: created.endpointIds } } })],
+    ['apiKeys', () => prisma.apiKey.deleteMany({ where: { id: { in: created.apiKeyIds } } })],
+    ['eventTypes', () => prisma.eventType.deleteMany({ where: { id: { in: created.eventTypeIds } } })],
+    ['projects', () => prisma.project.deleteMany({ where: { id: { in: created.projectIds } } })],
+    ['users', () => prisma.user.deleteMany({ where: { id: { in: created.userIds } } })],
+  ]),
+);
 
 async function createProject(token: string, name: string): Promise<string> {
   const res = await request(app)

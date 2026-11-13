@@ -15,6 +15,10 @@ export default defineConfig({
       // receivers; registration-time validation ignores it by design, and
       // production boot refuses it.
       DESTINATION_ALLOW_PRIVATE: 'true',
+      // The trigger endpoint runs a GLOBAL tick with this default batch
+      // size; keeping it tiny lets trigger tests fully occupy each batch
+      // with their own far-past fixtures (shared-database safety).
+      WORKER_BATCH_SIZE: '2',
     },
     // Integration tests share one real (Neon) database — run files sequentially
     // to keep connection counts low and rate-limiter state per file.

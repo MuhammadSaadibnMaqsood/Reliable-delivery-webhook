@@ -1,6 +1,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { prisma } from '../src/db/prisma.js';
+import { runCleanup } from './cleanup-helper.js';
 import {
   claimDueDeliveries,
   extendLease,
@@ -16,7 +17,13 @@ import { createWorker } from '../src/services/worker.service.js';
  */
 
 const UUID_FORMAT = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}$|^[0-9a-f-]{36}$/i;
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Deterministic lease expiry: backdate OUR OWN row — no real-time sleeps. */
+const expireLease = (deliveryId: string) =>
+  prisma.delivery.update({
+    where: { id: deliveryId },
+    data: { leaseExpiresAt: new Date(Date.now() - 3_600_000) },
+  });
 
 const created = {
   userIds: [] as string[],
@@ -64,15 +71,16 @@ beforeAll(async () => {
   created.endpointIds.push(endpointId);
 });
 
-afterAll(async () => {
-  await prisma.delivery.deleteMany({ where: { id: { in: created.deliveryIds } } });
-  await prisma.event.deleteMany({ where: { id: { in: created.eventIds } } });
-  await prisma.endpoint.deleteMany({ where: { id: { in: created.endpointIds } } });
-  await prisma.eventType.deleteMany({ where: { id: { in: created.eventTypeIds } } });
-  await prisma.project.deleteMany({ where: { id: { in: created.projectIds } } });
-  await prisma.user.deleteMany({ where: { id: { in: created.userIds } } });
-  await prisma.$disconnect();
-});
+afterAll(() =>
+  runCleanup('worker', [
+    ['deliveries', () => prisma.delivery.deleteMany({ where: { id: { in: created.deliveryIds } } })],
+    ['events', () => prisma.event.deleteMany({ where: { id: { in: created.eventIds } } })],
+    ['endpoints', () => prisma.endpoint.deleteMany({ where: { id: { in: created.endpointIds } } })],
+    ['eventTypes', () => prisma.eventType.deleteMany({ where: { id: { in: created.eventTypeIds } } })],
+    ['projects', () => prisma.project.deleteMany({ where: { id: { in: created.projectIds } } })],
+    ['users', () => prisma.user.deleteMany({ where: { id: { in: created.userIds } } })],
+  ]),
+);
 
 interface DeliverySeed {
   status?: 'pending' | 'processing';
@@ -183,11 +191,11 @@ describe('lease expiry, reclaim and fencing', () => {
   it('expired leases with attempts left are reclaimed with a NEW token; stale CAS writes nothing', async () => {
     const id = await seedDelivery({ maxAttempts: 3 });
 
-    const [first] = await claimDueDeliveries('worker-A', 1, 150); // 150 ms lease
+    const [first] = await claimDueDeliveries('worker-A', 1, 60_000);
     expect(first?.id).toBe(id);
     const oldToken = first!.claimToken;
 
-    await sleep(600); // lease expires; worker-A is presumed dead
+    await expireLease(id); // worker-A is presumed dead (deterministic, no sleep)
 
     const [reclaimed] = await claimDueDeliveries('worker-B', 1, 60_000);
     expect(reclaimed?.id).toBe(id);
@@ -213,10 +221,10 @@ describe('lease expiry, reclaim and fencing', () => {
   it('lease expiry ALONE does not invalidate a token (un-reclaimed worker still owns its claim)', async () => {
     const id = await seedDelivery();
 
-    const [claim] = await claimDueDeliveries('worker-slow', 1, 150);
+    const [claim] = await claimDueDeliveries('worker-slow', 1, 60_000);
     expect(claim?.id).toBe(id);
 
-    await sleep(600); // lease long expired — but NOBODY reclaimed or swept
+    await expireLease(id); // lease long expired — but NOBODY reclaimed or swept
 
     const stillOwner = await extendLease({ deliveryId: id, claimToken: claim!.claimToken }, 60_000);
     expect(stillOwner).toBe(true); // the token dies by replacement, not by clock

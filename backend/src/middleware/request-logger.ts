@@ -16,7 +16,12 @@ export const requestLogger = pinoHttp({
     return id;
   },
   redact: {
-    paths: ['req.headers.authorization', 'req.headers.cookie', 'req.headers["x-api-key"]'],
+    paths: [
+      'req.headers.authorization',
+      'req.headers.cookie',
+      'req.headers["x-api-key"]',
+      'req.headers["x-worker-secret"]',
+    ],
     censor: '[REDACTED]',
   },
   customLogLevel: (_req, res, err) => {

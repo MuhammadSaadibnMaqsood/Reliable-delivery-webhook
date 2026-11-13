@@ -3,6 +3,7 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { prisma } from '../src/db/prisma.js';
+import { runCleanup } from './cleanup-helper.js';
 import { executeClaimedDelivery } from '../src/services/delivery-executor.service.js';
 import {
   claimDueDeliveries,
@@ -64,17 +65,18 @@ beforeAll(async () => {
   created.eventTypeIds.push(eventTypeId);
 });
 
-afterAll(async () => {
-  await new Promise((resolve) => server.close(resolve));
-  await prisma.deliveryAttempt.deleteMany({ where: { deliveryId: { in: created.deliveryIds } } });
-  await prisma.delivery.deleteMany({ where: { id: { in: created.deliveryIds } } });
-  await prisma.event.deleteMany({ where: { id: { in: created.eventIds } } });
-  await prisma.endpoint.deleteMany({ where: { id: { in: created.endpointIds } } });
-  await prisma.eventType.deleteMany({ where: { id: { in: created.eventTypeIds } } });
-  await prisma.project.deleteMany({ where: { id: { in: created.projectIds } } });
-  await prisma.user.deleteMany({ where: { id: { in: created.userIds } } });
-  await prisma.$disconnect();
-});
+afterAll(() =>
+  runCleanup('retry-engine', [
+    ['server', () => new Promise((resolve) => server.close(resolve))],
+    ['attempts', () => prisma.deliveryAttempt.deleteMany({ where: { deliveryId: { in: created.deliveryIds } } })],
+    ['deliveries', () => prisma.delivery.deleteMany({ where: { id: { in: created.deliveryIds } } })],
+    ['events', () => prisma.event.deleteMany({ where: { id: { in: created.eventIds } } })],
+    ['endpoints', () => prisma.endpoint.deleteMany({ where: { id: { in: created.endpointIds } } })],
+    ['eventTypes', () => prisma.eventType.deleteMany({ where: { id: { in: created.eventTypeIds } } })],
+    ['projects', () => prisma.project.deleteMany({ where: { id: { in: created.projectIds } } })],
+    ['users', () => prisma.user.deleteMany({ where: { id: { in: created.userIds } } })],
+  ]),
+);
 
 async function seedEndpoint(path: string): Promise<string> {
   const endpoint = await prisma.endpoint.create({

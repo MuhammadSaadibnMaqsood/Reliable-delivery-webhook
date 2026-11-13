@@ -5,6 +5,7 @@ import { logger } from '../utils/logger.js';
 import { executeClaimedDelivery, type ExecutionOutcome } from './delivery-executor.service.js';
 import {
   claimDueDeliveries,
+  extendLease,
   sweepExhaustedExpiredLeases,
   type ClaimedDelivery,
 } from './delivery-queue.service.js';
@@ -57,11 +58,28 @@ export function createWorker(options: WorkerOptions = {}): DeliveryWorker {
 
       const claimed = await claimDueDeliveries(workerId, batchSize, leaseMs);
 
-      // Sequential on purpose: the batch is already bounded (NFR-04), and
-      // serial execution keeps per-attempt timeouts comfortably inside the
-      // lease. executeClaimedDelivery never throws.
+      // Sequential on purpose (NFR-04 bounded batches, no parallelism).
+      //
+      // Lease discipline: claiming leases the WHOLE batch at claim time, but
+      // execution drains serially — so a later item's lease would otherwise
+      // tick away while it waits its turn, and under a frequent scheduler a
+      // competing tick would legitimately reclaim it, guaranteeing a
+      // duplicate HTTP send. Renewing the lease (CAS on the fencing token)
+      // immediately before EACH item fixes that: the lease now only ever
+      // needs to cover ONE in-flight attempt (env enforces
+      // WORKER_LEASE_MS > the 30 s endpoint timeout cap), and a renewal
+      // that returns false means the claim was already lost — the item is
+      // skipped WITHOUT sending, which strictly reduces duplicates.
       const outcomes: Record<string, ExecutionOutcome> = {};
       for (const claim of claimed) {
+        const stillOwned = await extendLease(
+          { deliveryId: claim.id, claimToken: claim.claimToken },
+          leaseMs,
+        );
+        if (!stillOwned) {
+          outcomes[claim.id] = 'stale'; // lost while queued: write and send nothing
+          continue;
+        }
         outcomes[claim.id] = await executeClaimedDelivery(claim);
       }
 

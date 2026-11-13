@@ -3,6 +3,7 @@ import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/db/prisma.js';
+import { runCleanup } from './cleanup-helper.js';
 import {
   canonicalJsonStringify,
   canonicalPayloadHash,
@@ -85,14 +86,15 @@ beforeAll(async () => {
   await setupUserProjectKey();
 });
 
-afterAll(async () => {
-  await prisma.event.deleteMany({ where: { id: { in: created.eventIds } } });
-  await prisma.apiKey.deleteMany({ where: { id: { in: created.apiKeyIds } } });
-  await prisma.eventType.deleteMany({ where: { id: { in: created.eventTypeIds } } });
-  await prisma.project.deleteMany({ where: { id: { in: created.projectIds } } });
-  await prisma.user.deleteMany({ where: { id: { in: created.userIds } } });
-  await prisma.$disconnect();
-});
+afterAll(() =>
+  runCleanup('events', [
+    ['events', () => prisma.event.deleteMany({ where: { id: { in: created.eventIds } } })],
+    ['apiKeys', () => prisma.apiKey.deleteMany({ where: { id: { in: created.apiKeyIds } } })],
+    ['eventTypes', () => prisma.eventType.deleteMany({ where: { id: { in: created.eventTypeIds } } })],
+    ['projects', () => prisma.project.deleteMany({ where: { id: { in: created.projectIds } } })],
+    ['users', () => prisma.user.deleteMany({ where: { id: { in: created.userIds } } })],
+  ]),
+);
 
 function ingest(body: unknown, options: { key?: string; idempotencyKey?: string | null } = {}) {
   const req = request(app).post('/api/v1/events');

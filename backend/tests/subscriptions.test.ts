@@ -3,6 +3,7 @@ import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/db/prisma.js';
+import { runCleanup } from './cleanup-helper.js';
 
 /**
  * Phase 4B event type + subscription tests against the real database.
@@ -82,16 +83,17 @@ beforeAll(async () => {
   endpointId = await makeEndpoint(alice.token, projectA1);
 });
 
-afterAll(async () => {
-  await prisma.delivery.deleteMany({ where: { id: { in: created.deliveryIds } } });
-  await prisma.event.deleteMany({ where: { id: { in: created.eventIds } } });
-  await prisma.subscription.deleteMany({ where: { id: { in: created.subscriptionIds } } });
-  await prisma.endpoint.deleteMany({ where: { id: { in: created.endpointIds } } });
-  await prisma.eventType.deleteMany({ where: { id: { in: created.eventTypeIds } } });
-  await prisma.project.deleteMany({ where: { id: { in: created.projectIds } } });
-  await prisma.user.deleteMany({ where: { id: { in: created.userIds } } });
-  await prisma.$disconnect();
-});
+afterAll(() =>
+  runCleanup('subscriptions', [
+    ['deliveries', () => prisma.delivery.deleteMany({ where: { id: { in: created.deliveryIds } } })],
+    ['events', () => prisma.event.deleteMany({ where: { id: { in: created.eventIds } } })],
+    ['subscriptions', () => prisma.subscription.deleteMany({ where: { id: { in: created.subscriptionIds } } })],
+    ['endpoints', () => prisma.endpoint.deleteMany({ where: { id: { in: created.endpointIds } } })],
+    ['eventTypes', () => prisma.eventType.deleteMany({ where: { id: { in: created.eventTypeIds } } })],
+    ['projects', () => prisma.project.deleteMany({ where: { id: { in: created.projectIds } } })],
+    ['users', () => prisma.user.deleteMany({ where: { id: { in: created.userIds } } })],
+  ]),
+);
 
 describe('event types', () => {
   it('creates, enforces per-project uniqueness, allows same name across projects', async () => {

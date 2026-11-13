@@ -3,6 +3,7 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { prisma } from '../src/db/prisma.js';
+import { runCleanup } from './cleanup-helper.js';
 import { executeClaimedDelivery } from '../src/services/delivery-executor.service.js';
 import { dispatchWebhook } from '../src/services/delivery-http.service.js';
 import {
@@ -39,6 +40,23 @@ let server: http.Server;
 let port: number;
 const received: CapturedRequest[] = [];
 
+/**
+ * /hold gate — a controlled synchronization barrier (no real-time sleeps):
+ * each /hold request signals its arrival to the test and stays open until
+ * the test releases it, so concurrency choreography is event-driven.
+ */
+let holdArrivalResolvers: Array<() => void> = [];
+let holdPendingResponses: Array<() => void> = [];
+const nextHoldArrival = () =>
+  new Promise<void>((resolve) => {
+    holdArrivalResolvers.push(resolve);
+  });
+const releaseHoldResponses = () => {
+  const pending = holdPendingResponses;
+  holdPendingResponses = [];
+  for (const respond of pending) respond();
+};
+
 const created = {
   userIds: [] as string[],
   projectIds: [] as string[],
@@ -74,6 +92,13 @@ function startReceiver(): Promise<void> {
         case '/slow':
           setTimeout(() => res.writeHead(200).end('late'), 2_500);
           return;
+        case '/hold': // gated: held open until the test releases it
+          holdPendingResponses.push(() => res.writeHead(200).end('{"ok":true}'));
+          holdArrivalResolvers.shift()?.();
+          return;
+        case '/quick':
+          res.writeHead(200).end('{"ok":true}');
+          return;
         default:
           res.writeHead(200, { 'content-type': 'application/json' }).end('{"ok":true}');
       }
@@ -104,19 +129,19 @@ beforeAll(async () => {
   created.eventTypeIds.push(eventTypeId);
 });
 
-afterAll(async () => {
-  await new Promise((resolve) => server.close(resolve));
-  await prisma.deliveryAttempt.deleteMany({
-    where: { deliveryId: { in: created.deliveryIds } },
-  });
-  await prisma.delivery.deleteMany({ where: { id: { in: created.deliveryIds } } });
-  await prisma.event.deleteMany({ where: { id: { in: created.eventIds } } });
-  await prisma.endpoint.deleteMany({ where: { id: { in: created.endpointIds } } });
-  await prisma.eventType.deleteMany({ where: { id: { in: created.eventTypeIds } } });
-  await prisma.project.deleteMany({ where: { id: { in: created.projectIds } } });
-  await prisma.user.deleteMany({ where: { id: { in: created.userIds } } });
-  await prisma.$disconnect();
-});
+afterAll(() =>
+  runCleanup('delivery-execution', [
+    ['release-hold-gate', () => Promise.resolve(releaseHoldResponses())],
+    ['server', () => new Promise((resolve) => server.close(resolve))],
+    ['attempts', () => prisma.deliveryAttempt.deleteMany({ where: { deliveryId: { in: created.deliveryIds } } })],
+    ['deliveries', () => prisma.delivery.deleteMany({ where: { id: { in: created.deliveryIds } } })],
+    ['events', () => prisma.event.deleteMany({ where: { id: { in: created.eventIds } } })],
+    ['endpoints', () => prisma.endpoint.deleteMany({ where: { id: { in: created.endpointIds } } })],
+    ['eventTypes', () => prisma.eventType.deleteMany({ where: { id: { in: created.eventTypeIds } } })],
+    ['projects', () => prisma.project.deleteMany({ where: { id: { in: created.projectIds } } })],
+    ['users', () => prisma.user.deleteMany({ where: { id: { in: created.userIds } } })],
+  ]),
+);
 
 async function seedEndpoint(
   url: string,
@@ -136,8 +161,8 @@ async function seedEndpoint(
   return endpoint.id;
 }
 
-/** Seeds event + pending delivery (due 24 h ago) and claims it (batch 1). */
-async function seedAndClaim(endpointId: string): Promise<ClaimedDelivery> {
+/** Seeds event + pending delivery; ageMs sets claim-order priority. */
+async function seedPending(endpointId: string, ageMs = 86_400_000): Promise<string> {
   const event = await prisma.event.create({
     data: {
       projectId,
@@ -154,14 +179,19 @@ async function seedAndClaim(endpointId: string): Promise<ClaimedDelivery> {
       eventId: event.id,
       endpointId,
       maxAttempts: 3,
-      nextAttemptAt: new Date(Date.now() - 86_400_000),
+      nextAttemptAt: new Date(Date.now() - ageMs),
     },
   });
   created.deliveryIds.push(delivery.id);
+  return delivery.id;
+}
 
-  const claimed = await claimDueDeliveries(`exec-test-${randomUUID().slice(0, 8)}`, 1, 60_000);
+/** Seeds a due delivery (24 h past) and claims it (batch 1). */
+async function seedAndClaim(endpointId: string, leaseMs = 60_000): Promise<ClaimedDelivery> {
+  const deliveryId = await seedPending(endpointId);
+  const claimed = await claimDueDeliveries(`exec-test-${randomUUID().slice(0, 8)}`, 1, leaseMs);
   expect(claimed).toHaveLength(1);
-  expect(claimed[0]!.id).toBe(delivery.id);
+  expect(claimed[0]!.id).toBe(deliveryId);
   return claimed[0]!;
 }
 
@@ -403,6 +433,91 @@ describe('fencing during recording', () => {
     expect(row?.status).toBe('processing'); // untouched by the stale worker
     expect(row?.claimToken).toBe(replacementToken);
     expect(row?.attempts).toHaveLength(0); // no attempt row either
+  });
+});
+
+describe('serial batch lease discipline', () => {
+  it('a lease expiring mid-claim with NO competitor still records (the token outlives the clock)', async () => {
+    const ep = await seedEndpoint(`http://127.0.0.1:${port}/ok`);
+    const claim = await seedAndClaim(ep);
+    // Deterministic expiry on our own row — no sleep, no timing coupling.
+    await prisma.delivery.update({
+      where: { id: claim.id },
+      data: { leaseExpiresAt: new Date(Date.now() - 3_600_000) },
+    });
+
+    expect(await executeClaimedDelivery(claim)).toBe('succeeded');
+    const row = await prisma.delivery.findUnique({
+      where: { id: claim.id },
+      include: { attempts: true },
+    });
+    expect(row?.status).toBe('succeeded');
+    expect(row?.attempts).toHaveLength(1);
+  });
+
+  it('per-item renewal stops a queued item from being sent after a competitor reclaims it', async () => {
+    const epHold = await seedEndpoint(`http://127.0.0.1:${port}/hold`); // gated
+    const epQuick = await seedEndpoint(`http://127.0.0.1:${port}/quick`);
+    const d1 = await seedPending(epHold, 2 * 86_400_000); // strictly first in claim order
+    const d2 = await seedPending(epQuick);
+
+    const holdHitsBefore = hitsFor('/hold').length;
+    const quickHitsBefore = hitsFor('/quick').length;
+
+    const workerA = createWorker({ batchSize: 2, leaseMs: 60_000 });
+    const workerB = createWorker({ batchSize: 2, leaseMs: 60_000 });
+
+    try {
+      // Barrier choreography, entirely event-driven:
+      // 1. A claims BOTH and dispatches d1 to /hold, which stays open.
+      const aInFlight = nextHoldArrival();
+      const tickA = workerA.runTick();
+      await aInFlight; // A is provably mid-d1, with d2 queued behind it
+
+      // 2. A's leases "expire" (backdated on our own rows) and B reclaims
+      //    both, dispatching its own d1 request into the gate.
+      await Promise.all([
+        prisma.delivery.update({
+          where: { id: d1 },
+          data: { leaseExpiresAt: new Date(Date.now() - 3_600_000) },
+        }),
+        prisma.delivery.update({
+          where: { id: d2 },
+          data: { leaseExpiresAt: new Date(Date.now() - 3_600_000) },
+        }),
+      ]);
+      const bInFlight = nextHoldArrival();
+      const tickB = workerB.runTick();
+      await bInFlight; // B has reclaimed and is mid-d1 itself
+
+      // 3. Release both held responses; the race resolves on the tokens.
+      releaseHoldResponses();
+      const [resultA, resultB] = await Promise.all([tickA, tickB]);
+
+      expect(resultB.claimed.map((c) => c.id).sort()).toEqual([d1, d2].sort());
+      expect(resultB.outcomes[d1]).toBe('succeeded');
+      expect(resultB.outcomes[d2]).toBe('succeeded');
+
+      // A's in-flight item was fenced at recording; A's QUEUED item was
+      // skipped by the pre-item renewal check — before any HTTP.
+      expect(resultA.outcomes[d1]).toBe('stale');
+      expect(resultA.outcomes[d2]).toBe('stale');
+
+      expect(hitsFor('/hold').length - holdHitsBefore).toBe(2); // inherent in-flight duplicate
+      expect(hitsFor('/quick').length - quickHitsBefore).toBe(1); // PREVENTED queued duplicate
+
+      const rows = await prisma.delivery.findMany({
+        where: { id: { in: [d1, d2] } },
+        include: { attempts: true },
+      });
+      for (const row of rows) {
+        expect(row.status).toBe('succeeded'); // B recorded both
+        expect(row.attempts).toHaveLength(1); // exactly-once bookkeeping
+        expect(row.attemptCount).toBe(2); // A's claim + B's reclaim
+      }
+    } finally {
+      releaseHoldResponses(); // never leave sockets pinned open, even on failure
+    }
   });
 });
 

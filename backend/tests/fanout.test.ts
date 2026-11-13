@@ -5,6 +5,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { buildApp } from '../src/app.js';
 import { env } from '../src/config/env.js';
 import { prisma } from '../src/db/prisma.js';
+import { runCleanup } from './cleanup-helper.js';
 
 /**
  * Phase 5A.3 transactional fan-out tests against the real database.
@@ -87,21 +88,27 @@ beforeAll(async () => {
   epMulti = await mkEndpoint('multi');
 });
 
-afterAll(async () => {
-  const deliveries = await prisma.delivery.findMany({
-    where: { eventId: { in: created.eventIds } },
-    select: { id: true },
-  });
-  await prisma.delivery.deleteMany({ where: { id: { in: deliveries.map((d) => d.id) } } });
-  await prisma.event.deleteMany({ where: { id: { in: created.eventIds } } });
-  await prisma.subscription.deleteMany({ where: { id: { in: created.subscriptionIds } } });
-  await prisma.endpoint.deleteMany({ where: { id: { in: created.endpointIds } } });
-  await prisma.apiKey.deleteMany({ where: { id: { in: created.apiKeyIds } } });
-  await prisma.eventType.deleteMany({ where: { id: { in: created.eventTypeIds } } });
-  await prisma.project.deleteMany({ where: { id: { in: created.projectIds } } });
-  await prisma.user.deleteMany({ where: { id: { in: created.userIds } } });
-  await prisma.$disconnect();
-});
+afterAll(() =>
+  runCleanup('fanout', [
+    [
+      'deliveries (via own events)',
+      async () => {
+        const deliveries = await prisma.delivery.findMany({
+          where: { eventId: { in: created.eventIds } },
+          select: { id: true },
+        });
+        await prisma.delivery.deleteMany({ where: { id: { in: deliveries.map((d) => d.id) } } });
+      },
+    ],
+    ['events', () => prisma.event.deleteMany({ where: { id: { in: created.eventIds } } })],
+    ['subscriptions', () => prisma.subscription.deleteMany({ where: { id: { in: created.subscriptionIds } } })],
+    ['endpoints', () => prisma.endpoint.deleteMany({ where: { id: { in: created.endpointIds } } })],
+    ['apiKeys', () => prisma.apiKey.deleteMany({ where: { id: { in: created.apiKeyIds } } })],
+    ['eventTypes', () => prisma.eventType.deleteMany({ where: { id: { in: created.eventTypeIds } } })],
+    ['projects', () => prisma.project.deleteMany({ where: { id: { in: created.projectIds } } })],
+    ['users', () => prisma.user.deleteMany({ where: { id: { in: created.userIds } } })],
+  ]),
+);
 
 async function subscribe(endpointId: string, eventTypeName: string): Promise<string> {
   const types = await prisma.eventType.findMany({

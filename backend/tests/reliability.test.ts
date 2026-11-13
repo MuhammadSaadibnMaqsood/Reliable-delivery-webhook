@@ -5,6 +5,7 @@ import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/db/prisma.js';
+import { runCleanup } from './cleanup-helper.js';
 import { executeClaimedDelivery } from '../src/services/delivery-executor.service.js';
 import { claimDueDeliveries } from '../src/services/delivery-queue.service.js';
 import { createWorker } from '../src/services/worker.service.js';
@@ -21,7 +22,6 @@ import { WEBHOOK_HEADERS } from '../src/utils/webhook-signature.js';
 const app = buildApp();
 const PASSWORD = 'correct-horse-battery';
 const SIGNING_SECRET = `whsec_${randomBytes(32).toString('base64url')}`;
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 let server: http.Server;
 let port: number;
@@ -110,24 +110,30 @@ beforeAll(async () => {
   created.eventTypeIds.push(eventTypeId);
 });
 
-afterAll(async () => {
-  await new Promise((resolve) => server.close(resolve));
-  const deliveries = await prisma.delivery.findMany({
-    where: { eventId: { in: created.eventIds } },
-    select: { id: true },
-  });
-  const deliveryIds = deliveries.map((d) => d.id);
-  await prisma.deliveryAttempt.deleteMany({ where: { deliveryId: { in: deliveryIds } } });
-  await prisma.delivery.deleteMany({ where: { id: { in: deliveryIds } } });
-  await prisma.event.deleteMany({ where: { id: { in: created.eventIds } } });
-  await prisma.subscription.deleteMany({ where: { id: { in: created.subscriptionIds } } });
-  await prisma.endpoint.deleteMany({ where: { id: { in: created.endpointIds } } });
-  await prisma.apiKey.deleteMany({ where: { id: { in: created.apiKeyIds } } });
-  await prisma.eventType.deleteMany({ where: { id: { in: created.eventTypeIds } } });
-  await prisma.project.deleteMany({ where: { id: { in: created.projectIds } } });
-  await prisma.user.deleteMany({ where: { id: { in: created.userIds } } });
-  await prisma.$disconnect();
-});
+afterAll(() =>
+  runCleanup('reliability', [
+    ['server', () => new Promise((resolve) => server.close(resolve))],
+    [
+      'attempts+deliveries (via own events)',
+      async () => {
+        const deliveries = await prisma.delivery.findMany({
+          where: { eventId: { in: created.eventIds } },
+          select: { id: true },
+        });
+        const deliveryIds = deliveries.map((d) => d.id);
+        await prisma.deliveryAttempt.deleteMany({ where: { deliveryId: { in: deliveryIds } } });
+        await prisma.delivery.deleteMany({ where: { id: { in: deliveryIds } } });
+      },
+    ],
+    ['events', () => prisma.event.deleteMany({ where: { id: { in: created.eventIds } } })],
+    ['subscriptions', () => prisma.subscription.deleteMany({ where: { id: { in: created.subscriptionIds } } })],
+    ['endpoints', () => prisma.endpoint.deleteMany({ where: { id: { in: created.endpointIds } } })],
+    ['apiKeys', () => prisma.apiKey.deleteMany({ where: { id: { in: created.apiKeyIds } } })],
+    ['eventTypes', () => prisma.eventType.deleteMany({ where: { id: { in: created.eventTypeIds } } })],
+    ['projects', () => prisma.project.deleteMany({ where: { id: { in: created.projectIds } } })],
+    ['users', () => prisma.user.deleteMany({ where: { id: { in: created.userIds } } })],
+  ]),
+);
 
 /** Endpoint + subscription straight in the DB (local mock URL). */
 async function wireEndpoint(path: string, maxAttempts?: number): Promise<string> {
@@ -294,10 +300,14 @@ describe('concurrency and crash behavior', () => {
     const deliveryId = (await deliveryOf(eventId)).id;
     await forceDue(deliveryId);
 
-    // Worker A claims with a tiny lease and will be slow; B reclaims and races.
-    const [claimA] = await claimDueDeliveries('worker-A', 1, 150);
+    // Worker A claims; its lease is then backdated (deterministic expiry,
+    // no sleep) so B legitimately reclaims while A is still alive.
+    const [claimA] = await claimDueDeliveries('worker-A', 1, 60_000);
     expect(claimA?.id).toBe(deliveryId);
-    await sleep(600); // A's lease is gone (presumed dead — but it is alive)
+    await prisma.delivery.update({
+      where: { id: deliveryId },
+      data: { leaseExpiresAt: new Date(Date.now() - 3_600_000) },
+    });
     const [claimB] = await claimDueDeliveries('worker-B', 1, 60_000);
     expect(claimB?.id).toBe(deliveryId);
 

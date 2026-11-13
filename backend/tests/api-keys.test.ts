@@ -3,6 +3,7 @@ import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/db/prisma.js';
+import { runCleanup } from './cleanup-helper.js';
 import { generateApiKey } from '../src/utils/api-key.js';
 
 /**
@@ -82,12 +83,13 @@ beforeAll(async () => {
   bobProject = await makeProject(bob.token, 'Key Project B');
 });
 
-afterAll(async () => {
-  await prisma.apiKey.deleteMany({ where: { id: { in: created.apiKeyIds } } });
-  await prisma.project.deleteMany({ where: { id: { in: created.projectIds } } });
-  await prisma.user.deleteMany({ where: { id: { in: created.userIds } } });
-  await prisma.$disconnect();
-});
+afterAll(() =>
+  runCleanup('api-keys', [
+    ['apiKeys', () => prisma.apiKey.deleteMany({ where: { id: { in: created.apiKeyIds } } })],
+    ['projects', () => prisma.project.deleteMany({ where: { id: { in: created.projectIds } } })],
+    ['users', () => prisma.user.deleteMany({ where: { id: { in: created.userIds } } })],
+  ]),
+);
 
 describe('key generation', () => {
   it('creates a key, returns plaintext exactly once, stores only prefix + SHA-256', async () => {

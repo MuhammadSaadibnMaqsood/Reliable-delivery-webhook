@@ -33,9 +33,11 @@ const envSchema = z.object({
   DELIVERY_MAX_ATTEMPTS_DEFAULT: z.coerce.number().int().min(1).max(20).default(5),
   // Worker tick bounds (NFR-04: bounded batches within serverless limits).
   WORKER_BATCH_SIZE: z.coerce.number().int().min(1).max(100).default(10),
-  // Claim lease duration; must stay comfortably above the endpoint timeout
-  // cap (30 s) so expiry means "worker is gone", not "request is slow".
-  WORKER_LEASE_MS: z.coerce.number().int().min(5_000).max(600_000).default(60_000),
+  // Claim lease duration. The tick renews the lease per item, so this must
+  // cover ONE in-flight attempt: strictly above the 30 s endpoint timeout
+  // cap plus margin — then expiry means "worker is gone", never "request is
+  // slow" or "item was queued behind a slow batch".
+  WORKER_LEASE_MS: z.coerce.number().int().min(35_000).max(600_000).default(60_000),
   // Per-attempt HTTP timeout when the endpoint has no timeout_ms override.
   DELIVERY_TIMEOUT_MS_DEFAULT: z.coerce.number().int().min(1_000).max(30_000).default(10_000),
   // DEV-ONLY escape hatch: lets the DELIVERY path dispatch to private/HTTP
@@ -49,6 +51,9 @@ const envSchema = z.object({
   // PROVISIONAL defaults pending the Phase-0 retry-policy decision.
   DELIVERY_RETRY_INITIAL_DELAY_MS: z.coerce.number().int().min(1_000).default(30_000),
   DELIVERY_RETRY_MAX_DELAY_MS: z.coerce.number().int().min(1_000).default(3_600_000),
+  // Shared secret the external scheduler presents to POST /internal/worker/tick.
+  // Dedicated credential: never the JWT secret, never the encryption key.
+  WORKER_TRIGGER_SECRET: z.string().min(32, 'must be at least 32 characters of random data'),
 }).superRefine((value, ctx) => {
   if (value.DELIVERY_RETRY_MAX_DELAY_MS < value.DELIVERY_RETRY_INITIAL_DELAY_MS) {
     ctx.addIssue({

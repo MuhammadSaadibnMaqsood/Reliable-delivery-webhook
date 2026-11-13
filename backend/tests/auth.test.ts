@@ -5,6 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { buildApp } from '../src/app.js';
 import { env } from '../src/config/env.js';
 import { prisma } from '../src/db/prisma.js';
+import { runCleanup } from './cleanup-helper.js';
 
 /**
  * Integration tests against the real database configured in .env.
@@ -34,10 +35,11 @@ async function registerAndLogin(tag: string): Promise<{ email: string; token: st
   return { email, token: login.body.data.token as string, userId: reg.body.data.user.id as string };
 }
 
-afterAll(async () => {
-  await prisma.user.deleteMany({ where: { email: { in: createdEmails } } });
-  await prisma.$disconnect();
-});
+afterAll(() =>
+  runCleanup('auth', [
+    ['users', () => prisma.user.deleteMany({ where: { email: { in: createdEmails } } })],
+  ]),
+);
 
 describe('registration', () => {
   it('registers a new user, normalizes the email, never leaks the hash', async () => {
