@@ -14,6 +14,8 @@ import { workerRouter } from '../src/routes/worker.routes.js';
  * (30 s timeout cap + overhead) ≈ 130 s, comfortably inside 300 s, while
  * per-item lease renewal keeps every claim's 60 s lease valid throughout.
  */
+import type { IncomingMessage, ServerResponse } from 'node:http';
+
 const app = express();
 app.disable('x-powered-by');
 app.use(requestLogger);
@@ -21,4 +23,10 @@ app.use('/internal/worker', workerRouter);
 app.use(notFoundHandler);
 app.use(errorHandler);
 
-export default app;
+// Literal function default export — see api/index.ts for why @vercel/node
+// requires this shape instead of exporting the Express app value directly.
+const invoke = app as unknown as (req: IncomingMessage, res: ServerResponse) => void;
+
+export default function handler(req: IncomingMessage, res: ServerResponse): void {
+  invoke(req, res);
+}

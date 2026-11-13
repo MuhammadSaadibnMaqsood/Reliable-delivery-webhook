@@ -11,6 +11,15 @@ import workerEntry from '../api/worker-tick.js';
  */
 
 describe('vercel function entries', () => {
+  it('both entries default-export literal handler functions (the shape @vercel/node validates)', () => {
+    expect(typeof apiEntry).toBe('function');
+    expect(typeof workerEntry).toBe('function');
+    // Named function declarations, not computed values — a regression here
+    // reproduces the "Invalid export found in module src/app.js" deploy error.
+    expect(apiEntry.name).toBe('handler');
+    expect(workerEntry.name).toBe('handler');
+  });
+
   it('api/index serves the full API with the standard envelopes', async () => {
     const health = await request(apiEntry).get('/health');
     expect([200, 503]).toContain(health.status); // healthy or degraded, never broken
