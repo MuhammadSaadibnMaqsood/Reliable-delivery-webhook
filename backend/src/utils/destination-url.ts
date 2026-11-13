@@ -29,6 +29,17 @@ export type DestinationValidation =
   | { valid: true; addresses: string[] }
   | { valid: false; reason: string };
 
+export interface DestinationValidationOptions {
+  /**
+   * DEV-ONLY (wired to DESTINATION_ALLOW_PRIVATE by the delivery path, and
+   * refused at boot in production): permits http:// and non-public
+   * addresses so local receivers can be exercised. Resolution and address
+   * collection still run in full — connection pinning is identical.
+   * Registration-time callers never pass this.
+   */
+  allowPrivate?: boolean;
+}
+
 const BLOCKED_HOSTNAME_SUFFIXES = ['.localhost', '.local', '.internal', '.home.arpa'];
 
 function fail(reason: string): DestinationValidation {
@@ -45,7 +56,12 @@ function isPublicAddress(address: string): boolean {
   return parsed.range() === 'unicast';
 }
 
-export async function validateDestinationUrl(rawUrl: string): Promise<DestinationValidation> {
+export async function validateDestinationUrl(
+  rawUrl: string,
+  options: DestinationValidationOptions = {},
+): Promise<DestinationValidation> {
+  const allowPrivate = options.allowPrivate === true;
+
   let url: URL;
   try {
     url = new URL(rawUrl);
@@ -53,7 +69,8 @@ export async function validateDestinationUrl(rawUrl: string): Promise<Destinatio
     return fail('Not a valid URL');
   }
 
-  if (url.protocol !== 'https:') {
+  const allowedProtocols = allowPrivate ? ['https:', 'http:'] : ['https:'];
+  if (!allowedProtocols.includes(url.protocol)) {
     return fail('Only https:// destinations are allowed');
   }
   if (url.username !== '' || url.password !== '') {
@@ -64,7 +81,10 @@ export async function validateDestinationUrl(rawUrl: string): Promise<Destinatio
   if (hostname.length === 0) {
     return fail('URL has no hostname');
   }
-  if (hostname === 'localhost' || BLOCKED_HOSTNAME_SUFFIXES.some((s) => hostname.endsWith(s))) {
+  if (
+    !allowPrivate &&
+    (hostname === 'localhost' || BLOCKED_HOSTNAME_SUFFIXES.some((s) => hostname.endsWith(s)))
+  ) {
     return fail('Destination hostname is not public');
   }
 
@@ -73,7 +93,7 @@ export async function validateDestinationUrl(rawUrl: string): Promise<Destinatio
     ? hostname.slice(1, -1)
     : hostname;
   if (ipaddr.isValid(bareHost)) {
-    return isPublicAddress(bareHost)
+    return allowPrivate || isPublicAddress(bareHost)
       ? { valid: true, addresses: [bareHost] }
       : fail('Destination IP address is not public');
   }
@@ -91,7 +111,7 @@ export async function validateDestinationUrl(rawUrl: string): Promise<Destinatio
   }
 
   const addresses = records.map((r) => r.address);
-  if (!addresses.every(isPublicAddress)) {
+  if (!allowPrivate && !addresses.every(isPublicAddress)) {
     return fail('Destination resolves to a non-public address');
   }
 

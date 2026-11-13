@@ -11,6 +11,10 @@ export default defineConfig({
     env: {
       NODE_ENV: 'development',
       LOG_LEVEL: 'warn',
+      // Delivery-path dev escape hatch so executor tests can hit local mock
+      // receivers; registration-time validation ignores it by design, and
+      // production boot refuses it.
+      DESTINATION_ALLOW_PRIVATE: 'true',
     },
     // Integration tests share one real (Neon) database — run files sequentially
     // to keep connection counts low and rate-limiter state per file.
