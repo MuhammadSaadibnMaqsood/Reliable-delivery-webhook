@@ -214,16 +214,18 @@ describe('successful delivery', () => {
 });
 
 describe('failure handling', () => {
-  it('5xx → failed with a retryable attempt; 4xx → failed with a permanent attempt', async () => {
+  it('5xx → retry scheduled (5B.3); 4xx → failed with a permanent attempt', async () => {
     const ep500 = await seedEndpoint(`http://127.0.0.1:${port}/fail500`);
     const claim500 = await seedAndClaim(ep500);
-    expect(await executeClaimedDelivery(claim500)).toBe('failed');
+    expect(await executeClaimedDelivery(claim500)).toBe('retrying');
 
     const row500 = await prisma.delivery.findUnique({
       where: { id: claim500.id },
       include: { attempts: true },
     });
-    expect(row500?.status).toBe('failed');
+    expect(row500?.status).toBe('pending'); // scheduled for retry
+    expect(row500?.completedAt).toBeNull();
+    expect(row500?.claimToken).toBeNull();
     expect(row500?.lastError).toContain('500');
     expect(row500?.attempts[0]).toMatchObject({
       outcome: 'failed_retryable',
@@ -267,7 +269,7 @@ describe('failure handling', () => {
     const claim = await seedAndClaim(ep);
 
     const startedAt = Date.now();
-    expect(await executeClaimedDelivery(claim)).toBe('failed');
+    expect(await executeClaimedDelivery(claim)).toBe('retrying'); // timeouts are retryable
     expect(Date.now() - startedAt).toBeLessThan(2_400); // did not wait for the 2.5 s body
 
     const row = await prisma.delivery.findUnique({
@@ -285,7 +287,7 @@ describe('failure handling', () => {
     const ep = await seedEndpoint(`http://no-such-${randomUUID().slice(0, 8)}.invalid/hook`);
     const claim = await seedAndClaim(ep);
 
-    expect(await executeClaimedDelivery(claim)).toBe('failed');
+    expect(await executeClaimedDelivery(claim)).toBe('retrying'); // dns is transient
     const row = await prisma.delivery.findUnique({
       where: { id: claim.id },
       include: { attempts: true },
@@ -439,9 +441,9 @@ describe('worker tick end-to-end', () => {
     const tick = await createWorker({ batchSize: 2, leaseMs: 60_000 }).runTick();
     expect(tick.claimed).toHaveLength(2);
     expect(tick.outcomes[okId]).toBe('succeeded');
-    expect(tick.outcomes[failId]).toBe('failed');
+    expect(tick.outcomes[failId]).toBe('retrying'); // 5xx + budget left
 
     expect((await prisma.delivery.findUnique({ where: { id: okId } }))?.status).toBe('succeeded');
-    expect((await prisma.delivery.findUnique({ where: { id: failId } }))?.status).toBe('failed');
+    expect((await prisma.delivery.findUnique({ where: { id: failId } }))?.status).toBe('pending');
   });
 });

@@ -138,24 +138,35 @@ export interface AttemptResultRecord {
 }
 
 /**
+ * The approved post-attempt transition set (frozen state machine):
+ *   succeeded / failed / dead_lettered — terminal: completed_at = now()
+ *   pending — retryable failure with budget left: next_attempt_at scheduled
+ *             by the backoff policy, completed_at stays NULL, last_error
+ *             carries the latest failure.
+ * Every variant clears claim_token / lease / locked_by, satisfying the
+ * lifecycle CHECKs.
+ */
+export type AttemptTransition =
+  | { to: 'succeeded' }
+  | { to: 'failed' }
+  | { to: 'dead_lettered' }
+  | { to: 'pending'; nextAttemptInMs: number };
+
+/**
  * Persist an attempt's result: the CAS delivery transition and the
  * delivery_attempts insert happen in ONE transaction, so an attempt row
  * exists if and only if its writer held the claim when it was recorded.
  * Zero CAS rows ⇒ claim lost ⇒ the transaction rolls back having written
  * NOTHING (the fenced-out worker leaves no trace — its attempt shows as the
  * same numbering gap a crash leaves).
- *
- * Phase 5B.2 transitions: success → succeeded, any failure → failed (retry
- * scheduling arrives in 5B.3). Terminal transitions clear lease/worker/
- * token, satisfying the claim_token lifecycle CHECK.
  */
 export async function recordAttemptResult(
   guard: ClaimGuard,
-  nextStatus: 'succeeded' | 'failed',
+  transition: AttemptTransition,
   attempt: AttemptResultRecord,
 ): Promise<boolean> {
   const lastError =
-    nextStatus === 'succeeded'
+    transition.to === 'succeeded'
       ? null
       : `${attempt.errorCategory ?? 'error'}: ${attempt.errorMessage ?? 'delivery failed'}`.slice(
           0,
@@ -163,19 +174,35 @@ export async function recordAttemptResult(
         );
 
   return prisma.$transaction(async (tx) => {
-    const affected = await tx.$executeRaw`
-      UPDATE deliveries
-      SET status = ${nextStatus}::delivery_status,
-          completed_at = now(),
-          last_error = ${lastError},
-          claim_token = NULL,
-          lease_expires_at = NULL,
-          locked_by = NULL,
-          updated_at = now()
-      WHERE id = ${guard.deliveryId}::uuid
-        AND status = 'processing'
-        AND claim_token = ${guard.claimToken}::uuid
-    `;
+    const affected =
+      transition.to === 'pending'
+        ? await tx.$executeRaw`
+            UPDATE deliveries
+            SET status = 'pending',
+                next_attempt_at = now() + ${transition.nextAttemptInMs} * interval '1 millisecond',
+                completed_at = NULL,
+                last_error = ${lastError},
+                claim_token = NULL,
+                lease_expires_at = NULL,
+                locked_by = NULL,
+                updated_at = now()
+            WHERE id = ${guard.deliveryId}::uuid
+              AND status = 'processing'
+              AND claim_token = ${guard.claimToken}::uuid
+          `
+        : await tx.$executeRaw`
+            UPDATE deliveries
+            SET status = ${transition.to}::delivery_status,
+                completed_at = now(),
+                last_error = ${lastError},
+                claim_token = NULL,
+                lease_expires_at = NULL,
+                locked_by = NULL,
+                updated_at = now()
+            WHERE id = ${guard.deliveryId}::uuid
+              AND status = 'processing'
+              AND claim_token = ${guard.claimToken}::uuid
+          `;
     if (affected === 0) {
       return false; // claim lost — write nothing at all
     }

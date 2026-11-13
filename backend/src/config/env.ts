@@ -45,6 +45,18 @@ const envSchema = z.object({
     .enum(['true', 'false'])
     .default('false')
     .transform((value) => value === 'true'),
+  // Retry backoff (FR-39): bounded exponential, jittered in code.
+  // PROVISIONAL defaults pending the Phase-0 retry-policy decision.
+  DELIVERY_RETRY_INITIAL_DELAY_MS: z.coerce.number().int().min(1_000).default(30_000),
+  DELIVERY_RETRY_MAX_DELAY_MS: z.coerce.number().int().min(1_000).default(3_600_000),
+}).superRefine((value, ctx) => {
+  if (value.DELIVERY_RETRY_MAX_DELAY_MS < value.DELIVERY_RETRY_INITIAL_DELAY_MS) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['DELIVERY_RETRY_MAX_DELAY_MS'],
+      message: 'must be >= DELIVERY_RETRY_INITIAL_DELAY_MS',
+    });
+  }
 });
 
 const parsed = envSchema.safeParse(process.env);

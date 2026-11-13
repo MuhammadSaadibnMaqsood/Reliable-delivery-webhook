@@ -4,11 +4,13 @@ import { prisma } from '../db/prisma.js';
 import { decryptSecret } from '../utils/crypto.js';
 import { validateDestinationUrl } from '../utils/destination-url.js';
 import { logger } from '../utils/logger.js';
+import { computeRetryDelayMs } from '../utils/retry-policy.js';
 import { dispatchWebhook } from './delivery-http.service.js';
 import {
   cancelClaimedDelivery,
   failClaimedDeliveryWithoutAttempt,
   recordAttemptResult,
+  type AttemptTransition,
   type ClaimedDelivery,
 } from './delivery-queue.service.js';
 
@@ -24,10 +26,33 @@ import {
 
 export type ExecutionOutcome =
   | 'succeeded'
-  | 'failed'
+  | 'retrying' // retryable failure, budget left → pending with backoff
+  | 'dead_lettered' // retryable failure, budget exhausted
+  | 'failed' // permanent failure
   | 'cancelled'
   | 'stale' // claim lost before recording — nothing written
   | 'error'; // unexpected internal error, delivery left to lease recovery
+
+/**
+ * The approved post-failure decision (AC-03): permanent → failed; retryable
+ * with budget left → pending + jittered exponential backoff; retryable with
+ * the snapshotted max_attempts spent → dead_lettered.
+ */
+function resolveFailureTransition(
+  retryable: boolean,
+  claimed: ClaimedDelivery,
+): AttemptTransition {
+  if (!retryable) {
+    return { to: 'failed' };
+  }
+  if (claimed.attemptCount < claimed.maxAttempts) {
+    return { to: 'pending', nextAttemptInMs: computeRetryDelayMs(claimed.attemptCount) };
+  }
+  return { to: 'dead_lettered' };
+}
+
+const outcomeOfTransition = (transition: AttemptTransition): ExecutionOutcome =>
+  transition.to === 'pending' ? 'retrying' : transition.to;
 
 export interface ExecutionOptions {
   /** Test seam; defaults to the (production-refused) env flag. */
@@ -96,12 +121,14 @@ export async function executeClaimedDelivery(
     // --- Delivery-time SSRF re-validation (never trust registration time). ---
     const validation = await validateDestinationUrl(endpoint.url, { allowPrivate });
     if (!validation.valid) {
+      // DNS blips are transient → retry policy; SSRF/policy rejections are
+      // permanent (FR-41).
       const category = validation.reason.toLowerCase().includes('resolv') ? 'dns' : 'ssrf_blocked';
-      const applied = await recordAttemptResult(guard, 'failed', {
+      const retryable = category === 'dns';
+      const transition = resolveFailureTransition(retryable, claimed);
+      const applied = await recordAttemptResult(guard, transition, {
         attemptNumber: claimed.attemptCount,
-        // DNS blips are transient (retryable once 5B.3 lands); policy
-        // rejections are permanent.
-        outcome: category === 'dns' ? 'failed_retryable' : 'failed_permanent',
+        outcome: retryable ? 'failed_retryable' : 'failed_permanent',
         responseStatus: null,
         latencyMs: 0,
         errorCategory: category,
@@ -110,7 +137,7 @@ export async function executeClaimedDelivery(
         startedAt,
         finishedAt: new Date(),
       });
-      return applied ? 'failed' : 'stale';
+      return applied ? outcomeOfTransition(transition) : 'stale';
     }
 
     // --- Signed POST over a connection pinned to the vetted addresses. ---
@@ -128,7 +155,7 @@ export async function executeClaimedDelivery(
     const finishedAt = new Date();
 
     if (result.ok) {
-      const applied = await recordAttemptResult(guard, 'succeeded', {
+      const applied = await recordAttemptResult(guard, { to: 'succeeded' }, {
         attemptNumber: claimed.attemptCount,
         outcome: 'success',
         responseStatus: result.statusCode,
@@ -142,8 +169,7 @@ export async function executeClaimedDelivery(
       return applied ? 'succeeded' : 'stale';
     }
 
-    // Truthful FR-41 classification on the ATTEMPT (5B.3 uses it for retry
-    // decisions); the DELIVERY transition in this phase is always `failed`.
+    // FR-41 classification drives the retry decision (AC-03).
     const retryable =
       result.errorCategory === 'timeout' ||
       result.errorCategory === 'connection' ||
@@ -152,8 +178,9 @@ export async function executeClaimedDelivery(
       result.statusCode === 408 ||
       result.statusCode === 429;
     const outcome: AttemptOutcome = retryable ? 'failed_retryable' : 'failed_permanent';
+    const transition = resolveFailureTransition(retryable, claimed);
 
-    const applied = await recordAttemptResult(guard, 'failed', {
+    const applied = await recordAttemptResult(guard, transition, {
       attemptNumber: claimed.attemptCount,
       outcome,
       responseStatus: result.statusCode,
@@ -164,7 +191,7 @@ export async function executeClaimedDelivery(
       startedAt,
       finishedAt,
     });
-    return applied ? 'failed' : 'stale';
+    return applied ? outcomeOfTransition(transition) : 'stale';
   } catch (err) {
     // Unexpected internal failure: leave the delivery to lease recovery —
     // never let one delivery take down the tick.
