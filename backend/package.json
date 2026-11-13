@@ -13,6 +13,8 @@
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "worker:tick": "node dist/run-worker-tick.js",
+    "worker:tick:dev": "tsx src/run-worker-tick.ts",
     "prisma:validate": "prisma validate",
     "prisma:generate": "prisma generate",
     "prisma:migrate:new": "prisma migrate dev --create-only",
